@@ -461,7 +461,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="ch">
         <span class="ct">📋 Tồn kho — Ngày tồn = Hôm nay − Ngày nhập kho</span>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="btn btn-sm btn-s" id="btn-excel" onclick="expInvExcelSmart()">📊 Xuất Excel</button>
+          <button class="btn btn-sm btn-s" id="btn-excel" onclick="expInvExcelSmart()">📊 Xuất Excel (Chi tiết)</button>
+          <button class="btn btn-sm" style="background:#7c3aed;color:#fff;" onclick="openImportTonDau()">📥 Import Tồn Đầu</button>
           <button class="btn btn-sm btn-o" onclick="expInvCSV()">⬇️ CSV</button>
         </div>
       </div>
@@ -840,6 +841,41 @@ Vít M6x20mm" style="height:60px;background:#fff;"></textarea>
   <div class="md md-lg"><div class="mh"><h3>🖨️ Phiếu lấy hàng theo vị trí</h3><button class="xb" onclick="closeMo(&#39;mo-picklist&#39;)">✕</button></div>
   <div class="mb" id="pick-body"></div>
   <div class="mf"><button class="btn btn-o" onclick="closeMo(&#39;mo-picklist&#39;)">Đóng</button><button class="btn btn-p" onclick="printPickList()">🖨️ In phiếu</button></div></div>
+</div>
+
+<!-- Modal: Import Tồn Đầu -->
+<div class="mo hidden" id="mo-import-ton-dau">
+  <div class="md md-lg" style="max-width:780px;">
+    <div class="mh">
+      <h3>📥 Import Tồn Đầu vào Kho</h3>
+      <button class="xb" onclick="closeMo('mo-import-ton-dau')">✕</button>
+    </div>
+    <div class="mb">
+      <div class="alert ai" style="margin-bottom:12px;font-size:11px;">
+        <strong>📌 Hướng dẫn:</strong> Import dữ liệu tồn kho hiện tại vào hệ thống.<br>
+        • <strong>Ngày tồn</strong> = Hôm nay − Ngày sản xuất (lấy từ cột Mã tem SX nếu có) hoặc Ngày nhập kho.<br>
+        • Cột <strong>Mã tem SX</strong>: dán chuỗi QR đầy đủ (VD: <code>RX1-5869-000//G295/260526/015/0048/1/006/</code>) — hệ thống tự parse tên SP, SL, version, ngày SX.<br>
+        • Nếu không có Mã tem SX: điền thủ công các cột còn lại. Ngày tồn sẽ tính từ cột <strong>Ngày nhập kho</strong>.
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <button class="btn btn-o btn-sm" onclick="downloadImportTemplate()">⬇️ Tải file mẫu Excel</button>
+        <label class="btn btn-sm" style="background:var(--primary);color:#fff;cursor:pointer;">
+          📂 Chọn file Excel / CSV
+          <input type="file" id="import-file-inp" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleImportFile(this)">
+        </label>
+        <button class="btn btn-sm btn-o" onclick="document.getElementById('import-preview-wrap').innerHTML='';document.getElementById('import-file-inp').value='';importRows=[];">🗑️ Xóa</button>
+      </div>
+      <div id="import-alert" class="alert hidden" style="margin-bottom:10px;"></div>
+      <div id="import-preview-wrap" style="max-height:340px;overflow-y:auto;font-size:11px;"></div>
+    </div>
+    <div class="mf" style="justify-content:space-between;">
+      <div style="font-size:11px;color:var(--muted);" id="import-count-lbl"></div>
+      <div style="display:flex;gap:7px;">
+        <button class="btn btn-o" onclick="closeMo('mo-import-ton-dau')">Hủy</button>
+        <button class="btn" style="background:#7c3aed;color:#fff;" onclick="confirmImportTonDau()">✅ Xác nhận Import</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -2589,6 +2625,255 @@ function exportStReport() {
   XLSX.utils.book_append_sheet(wb, ws, "BienBan_DoiChieu_KiemKe");
   XLSX.writeFile(wb, `BienBan_KiemKe_Kho_Goldsun_${sessionId}.xlsx`);
 }
+
+// ══════════════════════════════════════════════════════
+// XUẤT EXCEL CHI TIẾT (cải tiến — đầy đủ cột v6)
+// ══════════════════════════════════════════════════════
+function expInvExcel(){
+  const td=today();
+  let L=DB.gL();
+  const srch=gv('inv-search').toLowerCase(),st=gv('inv-st'),wh=gv('inv-wh');
+  if(srch||st!=='all'||wh){
+    L=L.filter(l=>{
+      const ms=!srch||l.bravoCode.toLowerCase().includes(srch)||l.productName.toLowerCase().includes(srch)||(l.id||'').toLowerCase().includes(srch);
+      const mst=st==='all'||(st==='active'&&l.remaining>0&&l.status==='ACTIVE')||(st==='empty'&&(l.status==='EMPTY'||l.remaining<=0))||(st==='pending'&&l.status==='PENDING');
+      const mwh=!wh||(l.warehouse||'')===(wh);
+      return ms&&mst&&mwh;
+    });
+  }
+  const header=['Mã tem SX','Mã Bravo','Tên sản phẩm','Kho','Ngày nhập kho','Version','Ngày SX','Ngày tồn (ngày)','SL nhập','SL xuất','Tồn còn','Vị trí','Trạng thái','Ghi chú'];
+  const data=[header];
+  L.forEach(l=>{
+    const stockRef=l.stockDate||l.receivedDate||l.createdDate||td;
+    const age=ageDays(stockRef);
+    const recvDt=l.receivedAt?l.receivedAt.split(',')[0]:fmtD(l.receivedDate||l.createdDate);
+    const stMap={ACTIVE:'Còn hàng',EMPTY:'Hết hàng',PENDING:'Chờ nhập'};
+    data.push([
+      l.id,l.bravoCode,l.productName,l.warehouse||'',
+      recvDt,l.version||'',fmtD(l.stockDate)||'',
+      age!==null?age:'',
+      l.qty,l.issued||0,l.remaining,
+      l.location||'',stMap[l.status]||l.status,l.note||''
+    ]);
+  });
+  const ws=XLSX.utils.aoa_to_sheet(data);
+  ws['!cols']=[{wch:38},{wch:14},{wch:28},{wch:10},{wch:16},{wch:8},{wch:12},{wch:12},{wch:9},{wch:9},{wch:9},{wch:12},{wch:10},{wch:20}];
+  // Bold header
+  const range=XLSX.utils.decode_range(ws['!ref']);
+  for(let c=range.s.c;c<=range.e.c;c++){
+    const cell=ws[XLSX.utils.encode_cell({r:0,c})];
+    if(cell)cell.s={font:{bold:true},fill:{fgColor:{rgb:'1A5FB4'}},alignment:{horizontal:'center'}};
+  }
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Tồn kho chi tiết');
+  XLSX.writeFile(wb,'ton_kho_chitiet_'+td+'.xlsx');
+}
+
+// ══════════════════════════════════════════════════════
+// IMPORT TỒN ĐẦU
+// ══════════════════════════════════════════════════════
+let importRows=[];
+
+function openImportTonDau(){
+  importRows=[];
+  document.getElementById('import-preview-wrap').innerHTML='';
+  document.getElementById('import-count-lbl').textContent='';
+  const alertEl=document.getElementById('import-alert');if(alertEl)alertEl.classList.add('hidden');
+  const inp=document.getElementById('import-file-inp');if(inp)inp.value='';
+  document.getElementById('mo-import-ton-dau').classList.remove('hidden');
+}
+
+function downloadImportTemplate(){
+  const header=['Mã tem SX (chuỗi QR đầy đủ — tự parse)','Mã Bravo','Tên sản phẩm','Đơn vị','Kho','Vị trí','Số lượng tồn','Version','Ngày nhập kho (YYYY-MM-DD)','Ghi chú'];
+  const example=[
+    ['RX1-5869-000//G295/260526/015/0048/1/006/','','','','','a02-02-16','','','','Để trống Mã Bravo/Tên SP nếu có Mã tem SX — hệ thống tự parse'],
+    ['','CAN-BBE-00014','RX1-5869-000','Pcs','GSQV','a02-02-16',48,'6','2026-05-26','Nhập thủ công nếu không có chuỗi QR'],
+  ];
+  const ws=XLSX.utils.aoa_to_sheet([header,...example]);
+  ws['!cols']=[{wch:48},{wch:16},{wch:26},{wch:7},{wch:8},{wch:12},{wch:12},{wch:8},{wch:18},{wch:40}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Template Tồn Đầu');
+  XLSX.writeFile(wb,'template_import_ton_dau.xlsx');
+}
+
+function handleImportFile(inp){
+  const file=inp.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      const data=new Uint8Array(e.target.result);
+      const wb=XLSX.read(data,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+      if(rows.length<2){sal('import-alert','aw','File trống hoặc không có dữ liệu!');return;}
+      parseImportRows(rows);
+    }catch(err){sal('import-alert','ad','❌ Lỗi đọc file: '+err.message);}
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function parseImportRows(rows){
+  // Dòng đầu là header, bỏ qua
+  const dataRows=rows.slice(1).filter(r=>r.some(c=>String(c).trim()));
+  importRows=[];
+  const errs=[];
+  const td=today();
+
+  dataRows.forEach((r,i)=>{
+    const rowNum=i+2;
+    let rawQR=String(r[0]||'').trim();
+    let bravoCode=String(r[1]||'').trim();
+    let productName=String(r[2]||'').trim();
+    let unit=String(r[3]||'').trim()||'Cái';
+    let warehouse=String(r[4]||'').trim();
+    let location=String(r[5]||'').trim();
+    let qtyRaw=r[6];
+    let versionRaw=String(r[7]||'').trim();
+    let receivedDateRaw=String(r[8]||'').trim();
+    let note=String(r[9]||'').trim();
+
+    let qty=0,version='',stockDate='',parsedFromQR=false;
+
+    // Nếu có chuỗi QR → parse
+    if(rawQR&&rawQR.includes('//')){
+      const parsed=parseProductionQR(rawQR);
+      if(parsed){
+        productName=productName||parsed.productName;
+        qty=parsed.qty;
+        version=parsed.version||versionRaw;
+        stockDate=parsed.dateStr||'';
+        parsedFromQR=true;
+        // Tìm Bravo từ danh mục
+        if(!bravoCode){
+          const cat=DB.gC().find(c=>c.productName.toLowerCase()===parsed.productName.toLowerCase()||c.bravoCode.toLowerCase()===parsed.productName.toLowerCase());
+          bravoCode=cat?cat.bravoCode:parsed.productName;
+          if(!unit||unit==='Cái')unit=cat?cat.unit:'Cái';
+          if(!warehouse)warehouse=cat?cat.group||'':'';
+        }
+      } else {
+        errs.push('Dòng '+rowNum+': Mã tem SX không parse được → "'+rawQR.slice(0,40)+'"');
+        return;
+      }
+    } else {
+      // Nhập thủ công
+      qty=parseInt(String(qtyRaw||'').replace(/[^0-9]/g,''))||0;
+      version=versionRaw;
+      // Parse ngày nhập kho
+      if(receivedDateRaw){
+        // Chấp nhận YYYY-MM-DD hoặc DD/MM/YYYY
+        if(/^\d{4}-\d{2}-\d{2}$/.test(receivedDateRaw))stockDate=receivedDateRaw;
+        else if(/^\d{2}\/\d{2}\/\d{4}$/.test(receivedDateRaw)){const[d,m,y]=receivedDateRaw.split('/');stockDate=y+'-'+m+'-'+d;}
+        else if(receivedDateRaw instanceof Date)stockDate=receivedDateRaw.toISOString().slice(0,10);
+        else stockDate='';
+      }
+    }
+    if(!productName&&!bravoCode){errs.push('Dòng '+rowNum+': Thiếu Mã Bravo hoặc Tên sản phẩm');return;}
+    if(qty<1){
+      // Nếu không có qty mà parse từ QR thành công thì vẫn lấy qty từ QR
+      if(!parsedFromQR){errs.push('Dòng '+rowNum+': Số lượng tồn = 0');return;}
+    }
+    if(!location){errs.push('Dòng '+rowNum+': Thiếu vị trí kho');return;}
+
+    // Tính ngày tồn: ưu tiên stockDate (ngày SX từ QR hoặc ngày nhập kho nhập tay)
+    const finalStockDate=stockDate||td;
+    const ageDays_val=ageDays(finalStockDate);
+
+    importRows.push({
+      rawQR,bravoCode,productName,unit,warehouse,location,qty,version,
+      stockDate:finalStockDate,note,parsedFromQR,
+      ageDays:ageDays_val!==null?ageDays_val:0,
+      receivedDate:td // ngày import = hôm nay (ngày nhập kho vào hệ thống)
+    });
+  });
+
+  if(errs.length){sal('import-alert','aw','⚠️ '+errs.length+' dòng có lỗi:<br>'+errs.slice(0,5).join('<br>')+(errs.length>5?'<br>...':'')); }
+  else{const a=document.getElementById('import-alert');if(a)a.classList.add('hidden');}
+
+  renderImportPreview();
+}
+
+function renderImportPreview(){
+  const wrap=document.getElementById('import-preview-wrap');
+  const countLbl=document.getElementById('import-count-lbl');
+  if(!importRows.length){wrap.innerHTML='<p style="color:var(--muted);padding:10px;">Chưa có dữ liệu hợp lệ.</p>';countLbl.textContent='';return;}
+  countLbl.textContent=importRows.length+' dòng sẵn sàng import';
+  wrap.innerHTML=`<div class="tw"><table>
+    <thead><tr style="font-size:11px;">
+      <th>#</th><th>Mã tem / QR</th><th>Mã Bravo</th><th>Tên SP</th><th>ĐVT</th><th>Kho</th><th>Vị trí</th><th>SL tồn</th><th>Ver</th><th>Ngày SX/Nhập</th><th>Ngày tồn</th><th>Ghi chú</th>
+    </tr></thead>
+    <tbody>${importRows.map((r,i)=>`<tr style="font-size:11px;">
+      <td>${i+1}</td>
+      <td class="mono" style="font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${r.rawQR||r.bravoCode}">${r.rawQR?r.rawQR.slice(0,22)+'…':r.bravoCode}</td>
+      <td><strong>${r.bravoCode}</strong></td>
+      <td>${r.productName}</td>
+      <td>${r.unit}</td>
+      <td>${r.warehouse||'—'}</td>
+      <td><span class="loc-b">📍 ${r.location}</span></td>
+      <td><strong>${r.qty}</strong></td>
+      <td>${r.version||'—'}</td>
+      <td>${fmtD(r.stockDate)}</td>
+      <td><span class="badge ${r.ageDays>30?'gd':r.ageDays>14?'gw':'gs'}">${r.ageDays}d</span></td>
+      <td style="color:var(--muted)">${r.note||''}</td>
+    </tr>`).join('')}
+    </tbody></table></div>`;
+}
+
+function confirmImportTonDau(){
+  if(!importRows.length){sal('import-alert','aw','Chưa có dữ liệu để import!');return;}
+  const existing=DB.gL();
+  const td=today();
+  let added=0,skipped=0;
+  const newLabels=[...existing];
+  const newTxns=[...DB.gT()];
+
+  importRows.forEach(r=>{
+    // Kiểm tra trùng ID (raw QR)
+    const id=r.rawQR||('TD-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase());
+    if(newLabels.find(l=>l.id===id)){skipped++;return;}
+
+    // Tìm mã Bravo từ danh mục nếu chưa có
+    let bravoCode=r.bravoCode;
+    let unit=r.unit;
+    let warehouse=r.warehouse;
+    if(!bravoCode||bravoCode==='(Chưa có DM)'){
+      const cat=DB.gC().find(c=>c.productName.toLowerCase()===r.productName.toLowerCase());
+      if(cat){bravoCode=cat.bravoCode;if(!unit||unit==='Cái')unit=cat.unit||r.unit;if(!warehouse)warehouse=cat.group||'';}
+      else bravoCode=r.productName;
+    }
+
+    const lbl={
+      id,bravoCode,productName:r.productName,
+      qty:r.qty,unit,pack:'—',warehouse,
+      version:r.version||'',lot:'',
+      note:r.note||'Tồn đầu import',printSize:'a5',
+      remaining:r.qty,issued:0,location:r.location,status:'ACTIVE',
+      createdAt:now(),createdDate:td,
+      receivedAt:now(),receivedDate:td,
+      // stockDate = ngày SX (tồn đầu) → dùng để tính ngày tồn đúng
+      stockDate:r.stockDate||td,
+      isTonDau:true,updatedAt:now()
+    };
+    newLabels.push(lbl);
+    newTxns.push({
+      id:genTid(),type:'NHẬP',labelId:id,bravoCode,productName:r.productName,
+      unit,qty:r.qty,warehouse,fromLoc:null,toLoc:r.location,
+      note:'Import tồn đầu'+(r.version?' v'+r.version:''),datetime:now(),date:td
+    });
+    added++;
+  });
+
+  DB.sL(newLabels);DB.sT(newTxns);
+  closeMo('mo-import-ton-dau');
+  sal('import-alert','as','');
+  gp('inventory');
+  // Thông báo
+  setTimeout(()=>alert('✅ Import thành công!\n• Đã thêm: '+added+' dòng\n• Bỏ qua (trùng): '+skipped+' dòng'),200);
+}
+
+// ══════════════════════════════════════════════════════
+// LOGIC NGÀY TỒN: tồn đầu dùng stockDate (ngày SX), quét mới dùng receivedDate
+// ageDays đã dùng l.stockDate (ngày SX từ QR khi nhập/import) — đúng cho cả 2 case
+// ══════════════════════════════════════════════════════
 
 //--- SYSTEM BOOT INIT ON LOAD ---
 window.onload=()=>{
